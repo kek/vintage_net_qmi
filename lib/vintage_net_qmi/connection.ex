@@ -18,6 +18,7 @@ defmodule VintageNetQMI.Connection do
   require Logger
 
   @configuration_retry 60_000
+  @bootstrap_retry 2_000
   @start_network_timeout 30_000
 
   @typedoc """
@@ -101,14 +102,17 @@ defmodule VintageNetQMI.Connection do
   # GenServer is alive to receive it. After that the modem only
   # re-emits on state changes, so without this bootstrap call
   # `registration_state` would stay `nil` even though the modem is
-  # already attached to the network. Query NAS once on init and feed
-  # the result into `Connectivity` as if it were a fresh indication.
+  # already attached to the network. Query NAS on init and feed the
+  # result into `Connectivity` as if it were a fresh indication. NAS
+  # often isn't up yet when this first runs (`:service_not_found`), so
+  # keep asking until it answers.
   defp bootstrap_serving_system(state) do
     case NetworkAccess.get_serving_system(state.qmi) do
       {:ok, serving_system} ->
         VintageNetQMI.Connectivity.serving_system_change(state.ifname, serving_system)
 
       {:error, _reason} ->
+        _ = Process.send_after(self(), :bootstrap_serving_system, @bootstrap_retry)
         :ok
     end
   end
@@ -194,6 +198,11 @@ defmodule VintageNetQMI.Connection do
       end
 
     {:noreply, new_state}
+  end
+
+  def handle_info(:bootstrap_serving_system, state) do
+    bootstrap_serving_system(state)
+    {:noreply, state}
   end
 
   def handle_info(:try_to_connect, state) do
