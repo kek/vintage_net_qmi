@@ -52,7 +52,7 @@ defmodule VintageNetQMI.RmnetChildSpawner do
     {:noreply, %{state | pending: still_pending}}
   end
 
-  defp try_create(%{child: child, parent: parent, mux_id: mux_id, attempts: n} = entry) do
+  defp try_create(%{child: child, parent: parent, attempts: n} = entry) do
     cond do
       not RmnetLink.interface_exists?(parent) and n >= @max_attempts ->
         Logger.warning(
@@ -64,27 +64,40 @@ defmodule VintageNetQMI.RmnetChildSpawner do
       not RmnetLink.interface_exists?(parent) ->
         {:retry, %{entry | attempts: n + 1}}
 
-      RmnetLink.interface_exists?(child) ->
-        :done
-
       true ->
-        case RmnetLink.ensure_child(parent, child, mux_id) do
-          :ok ->
-            Logger.info(
-              "[VintageNetQMI] created rmnet child #{child} over #{parent} (mux_id=#{mux_id})"
-            )
-
-            ensure_parent_up(parent)
-
+        with :ok <- ensure_child(entry),
+             :ok <- ensure_parent_up(entry) do
+          :done
+        else
+          {:error, _reason} when n >= @max_attempts ->
+            Logger.warning("[VintageNetQMI] giving up on rmnet child #{child} over #{parent}")
             :done
 
-          {:error, reason} ->
-            Logger.warning(
-              "[VintageNetQMI] failed to create rmnet child #{child}: #{inspect(reason)}"
-            )
-
+          {:error, _reason} ->
             {:retry, %{entry | attempts: n + 1}}
         end
+    end
+  end
+
+  defp ensure_child(%{child: child, parent: parent, mux_id: mux_id}) do
+    if RmnetLink.interface_exists?(child) do
+      :ok
+    else
+      case RmnetLink.ensure_child(parent, child, mux_id) do
+        :ok ->
+          Logger.info(
+            "[VintageNetQMI] created rmnet child #{child} over #{parent} (mux_id=#{mux_id})"
+          )
+
+          :ok
+
+        {:error, reason} = error ->
+          Logger.warning(
+            "[VintageNetQMI] failed to create rmnet child #{child}: #{inspect(reason)}"
+          )
+
+          error
+      end
     end
   end
 
@@ -94,14 +107,19 @@ defmodule VintageNetQMI.RmnetChildSpawner do
   # frame is dropped at rmnet_ipa0's tx queue (visible as `tx_drop` in
   # `/proc/net/dev`). `ip link` doesn't expose `add` on busybox, but
   # `RTM_NEWLINK` with `IFF_UP` does the job.
-  defp ensure_parent_up(parent) do
+  #
+  # Early in boot the modem's IPA isn't ready and this fails with
+  # ENODEV, so it's retried like the child creation. It also runs when
+  # the child already exists, so a restarted spawner still brings the
+  # parent up.
+  defp ensure_parent_up(%{parent: parent}) do
     case RmnetLink.set_up(parent) do
       :ok ->
         :ok
 
-      {:error, reason} ->
+      {:error, reason} = error ->
         Logger.warning("[VintageNetQMI] failed to bring up #{parent}: #{inspect(reason)}")
-        :ok
+        error
     end
   end
 end

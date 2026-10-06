@@ -263,10 +263,11 @@ defmodule VintageNetQMI.RmnetLink do
     payload_len = len - 16
     <<errno::little-signed-32, _rest::binary>> = binary_part(rest, 0, payload_len)
 
+    # The kernel reports a negative errno. Keep the number: OTP has no
+    # errno-to-atom table, and `:inet.format_error/1` raises on integers.
     case errno do
       0 -> :ok
-      n when n < 0 -> {:error, :inet.format_error(-n) |> List.to_string() |> String.to_atom()}
-      n -> {:error, :inet.format_error(n) |> List.to_string() |> String.to_atom()}
+      n -> {:error, {:errno, abs(n)}}
     end
   end
 
